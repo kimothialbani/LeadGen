@@ -1,0 +1,333 @@
+Of course\! Turning this script into a Django project is an **excellent** way to learn. It touches on many core concepts like databases, background tasks, and displaying data.
+
+Here’s a structured guide on how to develop your scraper as a Django project.
+
+-----
+
+### \#\# 1. Project Setup and Structure ⚙️
+
+First, set up the Django project itself. We'll create a "project" to house everything and an "app" specifically for the scraper's logic.
+
+1.  **Install Django & Other Libraries**:
+    It's best practice to use a virtual environment.
+
+    ```bash
+    # Create and activate a virtual environment
+    python -m venv venv
+    source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
+
+    # Install necessary packages
+    pip install django gspread google-auth-oauthlib google-auth-httplib2 requests
+    ```
+
+2.  **Create the Django Project**:
+    This creates the main directory for your project.
+
+    ```bash
+    django-admin startproject lead_generator .
+    ```
+
+3.  **Create the Scraper App**:
+    This creates a dedicated "app" to hold all the logic for scraping.
+
+    ```bash
+    python manage.py startapp scraper
+    ```
+
+4.  **Register the App**:
+    Tell your project that the `scraper` app exists. Open `lead_generator/settings.py` and add `'scraper'` to your `INSTALLED_APPS` list.
+
+    ```python
+    # lead_generator/settings.py
+
+    INSTALLED_APPS = [
+        'django.contrib.admin',
+        'django.contrib.auth',
+        'django.contrib.contenttypes',
+        'django.contrib.sessions',
+        'django.contrib.messages',
+        'django.contrib.staticfiles',
+        'scraper', # Add our new app here
+    ]
+    ```
+
+-----
+
+### \#\# 2. The Data Layer: Models
+
+Instead of just writing to a Google Sheet, a proper web application uses a database. Django's **Models** are how you define your database structure using Python.
+
+Open `scraper/models.py` and define the tables you'll need.
+
+```python
+# scraper/models.py
+
+from django.db import models
+
+class ZipCode(models.Model):
+    code = models.CharField(max_length=10, unique=True)
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('SCRAPED', 'Scraped'),
+    ]
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='PENDING')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.code
+
+class Category(models.Model):
+    name = models.CharField(max_length=255, unique=True)
+
+    def __str__(self):
+        return self.name
+
+class Lead(models.Model):
+    title = models.CharField(max_length=255)
+    phone_number = models.CharField(max_length=50, blank=True, null=True)
+    website = models.URLField(blank=True, null=True)
+    rating = models.FloatField(blank=True, null=True)
+    address = models.TextField(blank=True, null=True)
+    place_id = models.CharField(max_length=255, unique=True)
+    # This links the lead back to the search that found it
+    zip_code = models.ForeignKey(ZipCode, on_delete=models.SET_NULL, null=True)
+    category = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.title
+```
+
+**Run Migrations**: After defining your models, you need to create the actual database tables.
+
+```bash
+python manage.py makemigrations
+python manage.py migrate
+```
+
+-----
+
+### \#\# 3. The "Magic" Django Admin Panel ✨
+
+One of Django's best features for learning is its automatic admin interface. You can use it to manage your data without building a custom interface.
+
+1.  **Register Your Models**: Open `scraper/admin.py` and tell the admin about your models.
+
+    ```python
+    # scraper/admin.py
+
+    from django.contrib import admin
+    from .models import ZipCode, Category, Lead
+
+    @admin.register(ZipCode)
+    class ZipCodeAdmin(admin.ModelAdmin):
+        list_display = ('code', 'status', 'created_at')
+        list_filter = ('status',)
+
+    @admin.register(Category)
+    class CategoryAdmin(admin.ModelAdmin):
+        search_fields = ('name',)
+
+    @admin.register(Lead)
+    class LeadAdmin(admin.ModelAdmin):
+        list_display = ('title', 'phone_number', 'website', 'zip_code', 'category')
+        list_filter = ('zip_code', 'category')
+        search_fields = ('title', 'address')
+    ```
+
+2.  **Create a Superuser**: Create an account to log in to the admin panel.
+
+    ```bash
+    python manage.py createsuperuser
+    ```
+
+    (Follow the prompts to create your admin username and password).
+
+3.  **Explore\!**: Run the development server (`python manage.py runserver`) and go to `http://127.0.0.1:8000/admin/`. Log in, and you'll see your "Zip Codes," "Categories," and "Leads" sections. You can now **manually add the zip codes and categories** you want to scrape directly from this interface\!
+
+-----
+
+### \#\# 4. The Logic: Views and Background Tasks
+
+A web request shouldn't be held up for minutes while a scraper runs. The best practice is to trigger a **background task**. For this, we'll need a task queue like **Celery**.
+
+1.  **Install Celery and a Message Broker (Redis)**:
+
+    ```bash
+    pip install celery redis
+    ```
+
+    You'll also need to install and run Redis. The easiest way is with Docker: `docker run -d -p 6379:6379 redis`.
+
+2.  **Configure Celery**:
+
+      * In `lead_generator/settings.py`, add the Celery configuration:
+        ```python
+        # lead_generator/settings.py
+        CELERY_BROKER_URL = 'redis://localhost:6379/0'
+        CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+        ```
+      * Create a new file `lead_generator/celery.py`:
+        ```python
+        # lead_generator/celery.py
+        import os
+        from celery import Celery
+
+        os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'lead_generator.settings')
+        app = Celery('lead_generator')
+        app.config_from_object('django.conf:settings', namespace='CELERY')
+        app.autodiscover_tasks()
+        ```
+      * In `lead_generator/__init__.py`, add:
+        ```python
+        # lead_generator/__init__.py
+        from .celery import app as celery_app
+        __all__ = ('celery_app',)
+        ```
+
+3.  **Create the Scraper Task**: Create a new file `scraper/tasks.py`. This is where you'll adapt your original script's logic.
+
+    ```python
+    # scraper/tasks.py
+
+    from celery import shared_task
+    from .models import ZipCode, Category, Lead
+    # You'll need to refactor your script's functions into this file
+    # For example, import search_google_places, get_authed_session, etc.
+
+    @shared_task
+    def scrape_google_maps_task():
+        # 1. Fetch data from YOUR DATABASE, not Google Sheets
+        zips_to_process = ZipCode.objects.filter(status='PENDING')
+        categories = Category.objects.all()
+
+        # Your original script's authentication logic goes here
+        # authed_session = get_authed_session()
+
+        for zipcode in zips_to_process:
+            for category in categories:
+                query = f"{category.name} {zipcode.code}"
+                # places = search_google_places(authed_session, query)
+
+                # This is a placeholder for your actual API call result
+                places = [{'id': 'test1234', 'displayName': {'text': 'Fake Business'}, 'websiteUri': 'http://fake.com'}] # Replace with real API call
+
+                for place in places:
+                    # 2. Save results to YOUR DATABASE
+                    Lead.objects.update_or_create(
+                        place_id=place.get('id'),
+                        defaults={
+                            'title': place.get('displayName', {}).get('text'),
+                            'website': place.get('websiteUri'),
+                            # ... map other fields ...
+                            'zip_code': zipcode,
+                            'category': category
+                        }
+                    )
+
+            # 3. Update the status in YOUR DATABASE
+            zipcode.status = 'SCRAPED'
+            zipcode.save()
+
+        return "Scraping completed!"
+    ```
+
+4.  **Create the View**: The "view" is a function that runs when a user visits a URL. This view won't do the scraping itself; it will just *trigger* the background task.
+
+    ```python
+    # scraper/views.py
+
+    from django.shortcuts import render, redirect
+    from django.contrib import messages
+    from .tasks import scrape_google_maps_task
+
+    def dashboard(request):
+        # This will be the main page with the "start" button
+        return render(request, 'scraper/dashboard.html')
+
+    def start_scrape(request):
+        # Trigger the background task
+        scrape_google_maps_task.delay()
+        messages.success(request, "Scraping process has been started in the background!")
+        return redirect('dashboard')
+    ```
+
+-----
+
+### \#\# 5. The User Interface: URLs and Templates
+
+Finally, let's create a simple page with a button to start the process.
+
+1.  **Create URL Paths**: Create a file `scraper/urls.py` to define the app's URLs.
+
+    ```python
+    # scraper/urls.py
+
+    from django.urls import path
+    from . import views
+
+    urlpatterns = [
+        path('', views.dashboard, name='dashboard'),
+        path('start/', views.start_scrape, name='start_scrape'),
+    ]
+    ```
+
+2.  **Include App URLs in Project**: Now, link to those URLs from your main project. Open `lead_generator/urls.py`.
+
+    ```python
+    # lead_generator/urls.py
+
+    from django.contrib import admin
+    from django.urls import path, include
+
+    urlpatterns = [
+        path('admin/', admin.site.urls),
+        path('', include('scraper.urls')), # Include our scraper app's URLs
+    ]
+    ```
+
+3.  **Create the HTML Template**: Create the `dashboard.html` file.
+
+      * Create a directory `scraper/templates/scraper/`.
+      * Inside, create the file `dashboard.html`.
+
+    <!-- end list -->
+
+    ```html
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Lead Scraper</title>
+    </head>
+    <body>
+        <h1>Google Maps Lead Scraper</h1>
+
+        {% if messages %}
+            <ul>
+                {% for message in messages %}
+                    <li style="color: green;">{{ message }}</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        <form action="{% url 'start_scrape' %}" method="post">
+            {% csrf_token %}
+            <button type="submit">Start Scraping Now</button>
+        </form>
+
+        <p><a href="/admin/">Manage Zip Codes and Leads in the Admin Panel</a></p>
+    </body>
+    </html>
+    ```
+
+-----
+
+### \#\# How to Run It 🚀
+
+1.  Start the Redis server (e.g., via Docker).
+2.  Open a terminal and run the Celery worker: `celery -A lead_generator worker -l info`
+3.  Open a *second* terminal and run the Django server: `python manage.py runserver`
+4.  Go to `http://127.0.0.1:8000/admin/` to add your zip codes and categories.
+5.  Go to `http://127.0.0.1:8000/` and click the "Start Scraping Now" button.
+6.  Watch the Celery terminal to see the task running, and refresh your admin page to see the new leads appear in the database\!
